@@ -23,8 +23,8 @@ class CanvasController {
         private const val DEFAULT_SCAFFOLD_URL = "file:///android_asset/scaffold.html"
     }
 
-    @Volatile
-    private var webView: WebView? = null
+    // Support multiple WebViews for mirrored display
+    private val webViews = mutableListOf<WebView>()
 
     @Volatile
     private var currentUrl: String? = null
@@ -33,28 +33,47 @@ class CanvasController {
 
     /**
      * Attach a WebView to this controller.
+     * Multiple WebViews can be attached for mirrored display.
      */
     fun attach(webView: WebView) {
-        this.webView = webView
-        Log.d(TAG, "WebView attached")
+        synchronized(webViews) {
+            if (!webViews.contains(webView)) {
+                webViews.add(webView)
+                Log.d(TAG, "WebView attached (total: ${webViews.size})")
+            }
+        }
     }
 
     /**
-     * Detach the WebView.
+     * Detach a WebView.
+     */
+    fun detach(webView: WebView) {
+        synchronized(webViews) {
+            webViews.remove(webView)
+            Log.d(TAG, "WebView detached (remaining: ${webViews.size})")
+        }
+    }
+
+    /**
+     * Detach all WebViews.
      */
     fun detach() {
-        this.webView = null
-        Log.d(TAG, "WebView detached")
+        synchronized(webViews) {
+            webViews.clear()
+            Log.d(TAG, "All WebViews detached")
+        }
     }
 
     /**
-     * Navigate to a URL.
+     * Navigate to a URL (on all attached WebViews).
      */
     suspend fun navigate(url: String) = withContext(Dispatchers.Main) {
-        val wv = webView ?: throw IllegalStateException("WebView not attached")
-        currentUrl = url
-        wv.loadUrl(url)
-        Log.d(TAG, "Navigating to: $url")
+        synchronized(webViews) {
+            if (webViews.isEmpty()) throw IllegalStateException("No WebView attached")
+            currentUrl = url
+            webViews.forEach { it.loadUrl(url) }
+            Log.d(TAG, "Navigating to: $url (${webViews.size} WebViews)")
+        }
     }
 
     /**
@@ -65,19 +84,26 @@ class CanvasController {
     }
 
     /**
-     * Evaluate JavaScript and return result.
+     * Evaluate JavaScript on all WebViews and return result from first.
      */
     suspend fun eval(js: String): String = evalMutex.withLock {
         withContext(Dispatchers.Main) {
-            val wv = webView ?: throw IllegalStateException("WebView not attached")
+            val views = synchronized(webViews) { webViews.toList() }
+            if (views.isEmpty()) throw IllegalStateException("No WebView attached")
 
-            suspendCancellableCoroutine { continuation ->
-                wv.evaluateJavascript(js) { result ->
-                    if (continuation.isActive) {
-                        continuation.resume(result ?: "null")
+            // Execute on all WebViews, return result from first
+            var result: String = "null"
+            views.forEachIndexed { index, wv ->
+                suspendCancellableCoroutine<Unit> { continuation ->
+                    wv.evaluateJavascript(js) { res ->
+                        if (index == 0) result = res ?: "null"
+                        if (continuation.isActive) {
+                            continuation.resume(Unit)
+                        }
                     }
                 }
             }
+            result
         }
     }
 
@@ -137,13 +163,15 @@ class CanvasController {
 
     /**
      * Take a snapshot of the canvas as base64.
+     * Takes snapshot from first attached WebView.
      */
     suspend fun snapshotBase64(
         format: String = "jpeg",
         quality: Double = 0.8,
         maxWidth: Int? = null
     ): String = withContext(Dispatchers.Main) {
-        val wv = webView ?: throw IllegalStateException("WebView not attached")
+        val wv = synchronized(webViews) { webViews.firstOrNull() }
+            ?: throw IllegalStateException("No WebView attached")
 
         // Capture WebView to bitmap
         val bitmap = Bitmap.createBitmap(wv.width, wv.height, Bitmap.Config.ARGB_8888)

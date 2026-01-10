@@ -45,6 +45,16 @@ class BridgeSession(
     private val _incomingCommands = MutableSharedFlow<Triple<String, String, String?>>()
     val incomingCommands: SharedFlow<Triple<String, String, String?>> = _incomingCommands.asSharedFlow()
 
+    // Chat events from gateway: streaming text updates
+    private val _chatEvents = MutableSharedFlow<ChatEvent>()
+    val chatEvents: SharedFlow<ChatEvent> = _chatEvents.asSharedFlow()
+
+    // Chat event types
+    sealed class ChatEvent {
+        data class AgentText(val runId: String, val text: String) : ChatEvent()
+        data class ChatState(val runId: String?, val state: String, val errorMessage: String?) : ChatEvent()
+    }
+
     private var currentEndpoint: BridgeEndpoint? = null
     private var reconnectAttempt = 0
 
@@ -89,9 +99,9 @@ class BridgeSession(
                 readLoop()
             }
 
-            _isConnected.value = true
+            // Note: _isConnected will be set to true when we receive hello-ok or pair-ok
             reconnectAttempt = 0
-            Log.d(TAG, "Connected to $host:$port")
+            Log.d(TAG, "Socket connected to $host:$port, waiting for handshake...")
 
         } catch (e: Exception) {
             Log.e(TAG, "Connection failed: ${e.message}")
@@ -134,15 +144,18 @@ class BridgeSession(
                 val line = reader?.readLine() ?: break
                 if (line.isBlank()) continue
 
+                Log.d(TAG, "Received: $line")
                 try {
                     handleMessage(line)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error handling message: ${e.message}")
+                    Log.e(TAG, "Error handling message: ${e.message}", e)
                 }
             }
+            Log.d(TAG, "Read loop ended normally")
         } catch (e: Exception) {
-            Log.e(TAG, "Read loop error: ${e.message}")
+            Log.e(TAG, "Read loop error: ${e.message}", e)
         } finally {
+            Log.d(TAG, "Read loop finally block, setting disconnected")
             _isConnected.value = false
             scheduleReconnect()
         }
@@ -152,6 +165,8 @@ class BridgeSession(
         val msg = json.parseToJsonElement(line).jsonObject
         val type = msg["type"]?.jsonPrimitive?.content ?: return
 
+        Log.d(TAG, "Handling message type: $type")
+
         when (type) {
             "hello-ok" -> {
                 Log.d(TAG, "Hello acknowledged, connection established")
@@ -159,6 +174,7 @@ class BridgeSession(
                 msg["token"]?.jsonPrimitive?.content?.let { token ->
                     prefs.setBridgeToken(token)
                 }
+                _isConnected.value = true
             }
 
             "pair-ok" -> {
@@ -166,6 +182,7 @@ class BridgeSession(
                 msg["token"]?.jsonPrimitive?.content?.let { token ->
                     prefs.setBridgeToken(token)
                 }
+                _isConnected.value = true
             }
 
             "error" -> {
@@ -190,8 +207,56 @@ class BridgeSession(
 
             "event" -> {
                 val event = msg["event"]?.jsonPrimitive?.content
-                Log.d(TAG, "Received event: $event")
-                // Handle events like voicewake.changed, etc.
+                val payloadJson = msg["payloadJSON"]?.jsonPrimitive?.content
+                Log.d(TAG, "Received event: $event, payload: $payloadJson")
+
+                when (event) {
+                    "agent" -> {
+                        // Streaming AI response text
+                        if (payloadJson != null) {
+                            try {
+                                val payload = json.parseToJsonElement(payloadJson).jsonObject
+                                val runId = payload["runId"]?.jsonPrimitive?.content ?: return
+                                val stream = payload["stream"]?.jsonPrimitive?.content
+                                val data = payload["data"]?.jsonObject
+
+                                if (stream == "assistant" && data != null) {
+                                    val text = data["text"]?.jsonPrimitive?.content
+                                    if (text != null) {
+                                        Log.d(TAG, "Agent text update: $text")
+                                        _chatEvents.emit(ChatEvent.AgentText(runId, text))
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error parsing agent event: ${e.message}")
+                            }
+                        }
+                    }
+
+                    "chat" -> {
+                        // Chat state changes (final, error, aborted)
+                        if (payloadJson != null) {
+                            try {
+                                val payload = json.parseToJsonElement(payloadJson).jsonObject
+                                val runId = payload["runId"]?.jsonPrimitive?.content
+                                val state = payload["state"]?.jsonPrimitive?.content ?: return
+                                val errorMessage = payload["errorMessage"]?.jsonPrimitive?.content
+
+                                Log.d(TAG, "Chat state: $state for run $runId")
+                                _chatEvents.emit(ChatEvent.ChatState(runId, state, errorMessage))
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error parsing chat event: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            }
+
+            "res" -> {
+                val id = msg["id"]?.jsonPrimitive?.content
+                val ok = msg["ok"]?.jsonPrimitive?.booleanOrNull ?: false
+                val payload = msg["payloadJSON"]?.jsonPrimitive?.content
+                Log.d(TAG, "Received response: id=$id, ok=$ok, payload=$payload")
             }
         }
     }
@@ -254,23 +319,112 @@ class BridgeSession(
         sendMessage(msg.toString())
     }
 
+    // Session key for chat - persisted across app restarts
+    private val chatSessionKey: String by lazy {
+        prefs.getChatSessionKey() ?: UUID.randomUUID().toString().also {
+            prefs.setChatSessionKey(it)
+        }
+    }
+
+    /**
+     * Subscribe to chat events for our session.
+     * Must be called to receive agent/chat events.
+     */
+    suspend fun subscribeToChatEvents() {
+        val event = buildJsonObject {
+            put("type", "event")
+            put("event", "chat.subscribe")
+            put("payloadJSON", buildJsonObject {
+                put("sessionKey", chatSessionKey)
+            }.toString())
+        }
+
+        sendMessage(event.toString())
+        Log.d(TAG, "Subscribed to chat events for session: $chatSessionKey")
+    }
+
     /**
      * Send a chat message to gateway.
      */
     suspend fun sendChatMessage(text: String): String {
+        // Ensure we're subscribed to receive response events
+        subscribeToChatEvents()
+
         val requestId = UUID.randomUUID().toString()
+        val idempotencyKey = UUID.randomUUID().toString()
 
         val request = buildJsonObject {
             put("type", "req")
             put("id", requestId)
             put("method", "chat.send")
             put("paramsJSON", buildJsonObject {
-                put("text", text)
+                put("sessionKey", chatSessionKey)
+                put("message", text)
+                put("idempotencyKey", idempotencyKey)
             }.toString())
         }
 
         sendMessage(request.toString())
         return requestId
+    }
+
+    /**
+     * Start audio streaming session with gateway.
+     * Returns a session ID for the audio stream.
+     */
+    suspend fun startAudioStream(): String {
+        val sessionId = UUID.randomUUID().toString()
+
+        val request = buildJsonObject {
+            put("type", "req")
+            put("id", sessionId)
+            put("method", "audio.startStream")
+            put("paramsJSON", buildJsonObject {
+                put("format", "pcm")
+                put("sampleRate", 16000)
+                put("channels", 1)
+                put("bitsPerSample", 16)
+            }.toString())
+        }
+
+        sendMessage(request.toString())
+        return sessionId
+    }
+
+    /**
+     * Send an audio chunk to the gateway.
+     */
+    suspend fun sendAudioChunk(
+        sessionId: String,
+        chunkIndex: Long,
+        audioBase64: String,
+        isFinal: Boolean = false
+    ) {
+        val chunk = buildJsonObject {
+            put("type", "audio-chunk")
+            put("sessionId", sessionId)
+            put("chunkIndex", chunkIndex)
+            put("data", audioBase64)
+            put("isFinal", isFinal)
+        }
+
+        sendMessage(chunk.toString())
+    }
+
+    /**
+     * End the audio streaming session.
+     */
+    suspend fun endAudioStream(sessionId: String) {
+        val request = buildJsonObject {
+            put("type", "req")
+            put("id", UUID.randomUUID().toString())
+            put("method", "audio.endStream")
+            put("paramsJSON", buildJsonObject {
+                put("sessionId", sessionId)
+            }.toString())
+        }
+
+        sendMessage(request.toString())
     }
 
     private suspend fun sendMessage(message: String) = withContext(Dispatchers.IO) {

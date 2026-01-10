@@ -1,7 +1,13 @@
 package com.clawdbot.ar.ui
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -13,6 +19,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,18 +33,25 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.clawdbot.ar.ClawdARApp
 import com.clawdbot.ar.ConnectionState
+import com.clawdbot.ar.audio.AudioStreamer
+import com.clawdbot.ar.audio.ElevenLabsSTT
 import com.clawdbot.ar.ui.theme.ClawdARTheme
 import com.ffalcon.mercury.android.sdk.touch.CommonTouchCallback
 import com.ffalcon.mercury.android.sdk.touch.FlingArgs
 import com.ffalcon.mercury.android.sdk.touch.TouchDispatcher
 import com.ffalcon.mercury.android.sdk.touch.TouchDispatcherX3
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 /**
  * Main AR Activity for ClawdAR.
@@ -58,10 +72,24 @@ class ARActivity : ComponentActivity() {
     // Mercury SDK touch dispatcher for temple gestures
     private lateinit var touchDispatcher: TouchDispatcherX3
 
+    // Speech recognition (local)
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var isListening = false
+    private var useLocalSpeech = false  // Flag for whether local speech recognition is available
+
+    // Audio streaming with ElevenLabs STT
+    private var audioStreamer: AudioStreamer? = null
+    private var audioStreamJob: Job? = null
+    private var elevenLabsSTT: ElevenLabsSTT? = null
+
+    // ElevenLabs API key
+    private val elevenLabsApiKey = "sk_bf29f6d10be2ae94e488c865eea47633cd6a15a006d687e1"
+
     // UI state
     private var showSettings by mutableStateOf(false)
     private var inputText by mutableStateOf("")
     private var isVoiceMode by mutableStateOf(false)
+    private var voiceStatus by mutableStateOf("Tap to speak")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,9 +103,36 @@ class ARActivity : ComponentActivity() {
         // Initialize Mercury SDK touch dispatcher
         touchDispatcher = TouchDispatcherX3(TouchDispatcher.Source.Activity)
 
+        // Initialize speech recognizer
+        initSpeechRecognizer()
+
         setContent {
             ClawdARTheme {
-                ARScreen()
+                // Mirror content for AR glasses (full content on each eye)
+                // Left half of screen → left eye, right half → right eye
+                // Each Box gets 50% width (640px on 1280px screen)
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                ) {
+                    // Left eye content
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                    ) {
+                        ARScreen()
+                    }
+                    // Right eye content (mirror of left)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                    ) {
+                        ARScreen()
+                    }
+                }
             }
         }
 
@@ -93,6 +148,257 @@ class ARActivity : ComponentActivity() {
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller.hide(WindowInsetsCompat.Type.systemBars())
+    }
+
+    private fun initSpeechRecognizer() {
+        // Use ElevenLabs for speech-to-text (local speech recognition doesn't work on AR glasses)
+        useLocalSpeech = false
+        Log.d(TAG, "Using ElevenLabs STT for voice input")
+        voiceStatus = "Voice ready"
+
+        // Initialize audio streamer
+        audioStreamer = AudioStreamer(this)
+        Log.d(TAG, "AudioStreamer initialized")
+
+        // Initialize ElevenLabs STT
+        elevenLabsSTT = ElevenLabsSTT(elevenLabsApiKey)
+        Log.d(TAG, "ElevenLabs STT initialized")
+
+        // Skip local speech recognizer initialization
+        return
+
+        /*
+        // Original local speech recognition code (disabled - doesn't work on RayNeo glasses)
+        Log.d(TAG, "Creating local SpeechRecognizer...")
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+            setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    Log.d(TAG, "Speech: Ready for speech")
+                    voiceStatus = "Listening..."
+                    isListening = true
+                }
+
+                override fun onBeginningOfSpeech() {
+                    Log.d(TAG, "Speech: Beginning of speech")
+                    voiceStatus = "Hearing you..."
+                }
+
+                override fun onRmsChanged(rmsdB: Float) {}
+
+                override fun onBufferReceived(buffer: ByteArray?) {}
+
+                override fun onEndOfSpeech() {
+                    Log.d(TAG, "Speech: End of speech")
+                    voiceStatus = "Processing..."
+                    isListening = false
+                }
+
+                override fun onError(error: Int) {
+                    val errorMsg = when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH -> "No speech detected"
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Speech timeout"
+                        SpeechRecognizer.ERROR_AUDIO -> "Audio error"
+                        SpeechRecognizer.ERROR_NETWORK -> "Network error"
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
+                        else -> "Error: $error"
+                    }
+                    Log.e(TAG, "Speech error: $errorMsg")
+                    voiceStatus = errorMsg
+                    isListening = false
+
+                    // Auto-restart if still in voice mode (for continuous listening)
+                    if (isVoiceMode && error != SpeechRecognizer.ERROR_AUDIO) {
+                        startListening()
+                    }
+                }
+
+                override fun onResults(results: Bundle?) {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val recognizedText = matches?.firstOrNull() ?: ""
+                    Log.d(TAG, "Speech result: $recognizedText")
+
+                    if (recognizedText.isNotEmpty()) {
+                        voiceStatus = "Sending: $recognizedText"
+                        sendMessage(recognizedText)
+                    }
+
+                    // Continue listening if still in voice mode
+                    if (isVoiceMode) {
+                        startListening()
+                    }
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val partial = matches?.firstOrNull() ?: ""
+                    if (partial.isNotEmpty()) {
+                        voiceStatus = partial
+                    }
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+        }
+        */
+    }
+
+    private fun startListening() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            voiceStatus = "Requesting mic..."
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 100)
+            return
+        }
+
+        if (useLocalSpeech) {
+            // Use local speech recognition
+            startLocalSpeechRecognition()
+        } else {
+            // Use audio streaming to gateway
+            startAudioStreaming()
+        }
+    }
+
+    private fun startLocalSpeechRecognition() {
+        if (speechRecognizer == null) {
+            Log.e(TAG, "SpeechRecognizer is null, reinitializing...")
+            initSpeechRecognizer()
+        }
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+
+        try {
+            voiceStatus = "Starting..."
+            Log.d(TAG, "Starting local speech recognition...")
+            speechRecognizer?.startListening(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start speech recognition: ${e.message}", e)
+            voiceStatus = "Failed: ${e.message}"
+        }
+    }
+
+    private fun startAudioStreaming() {
+        Log.d(TAG, "Starting audio recording for ElevenLabs STT...")
+
+        val streamer = audioStreamer ?: run {
+            Log.e(TAG, "AudioStreamer not initialized")
+            voiceStatus = "Audio error"
+            return
+        }
+
+        if (streamer.isRecording.value) {
+            Log.w(TAG, "Already recording audio")
+            return
+        }
+
+        // Start capturing audio
+        if (!streamer.startRecording()) {
+            voiceStatus = "Mic unavailable"
+            return
+        }
+
+        // Observe audio status
+        audioStreamJob = lifecycleScope.launch {
+            streamer.status.collectLatest { status ->
+                voiceStatus = status
+            }
+        }
+
+        isListening = true
+        Log.d(TAG, "Audio recording started")
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 100 && grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            Log.d(TAG, "Mic permission granted, starting listening")
+            // Permission granted, start listening
+            startListening()
+        } else {
+            Log.e(TAG, "Mic permission denied")
+            voiceStatus = "Mic denied"
+            isVoiceMode = false
+        }
+    }
+
+    private fun stopListening() {
+        Log.d(TAG, "Stopping listening (useLocalSpeech=$useLocalSpeech)")
+
+        if (useLocalSpeech) {
+            // Stop local speech recognition
+            try {
+                speechRecognizer?.stopListening()
+                speechRecognizer?.cancel()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to stop speech recognition: ${e.message}")
+            }
+        } else {
+            // Stop audio streaming
+            stopAudioStreaming()
+        }
+
+        isListening = false
+        voiceStatus = "Tap to speak"
+    }
+
+    private fun stopAudioStreaming() {
+        Log.d(TAG, "Stopping audio recording and transcribing...")
+
+        audioStreamJob?.cancel()
+        audioStreamJob = null
+
+        val streamer = audioStreamer ?: return
+        streamer.stopRecording()
+
+        // Get buffered audio and transcribe
+        val audioData = streamer.getBufferedAudio()
+        if (audioData.isEmpty()) {
+            Log.w(TAG, "No audio data recorded")
+            voiceStatus = "No audio"
+            return
+        }
+
+        voiceStatus = "Transcribing..."
+        Log.d(TAG, "Transcribing ${audioData.size} bytes of audio...")
+
+        lifecycleScope.launch {
+            try {
+                val stt = elevenLabsSTT ?: run {
+                    Log.e(TAG, "ElevenLabs STT not initialized")
+                    voiceStatus = "STT error"
+                    return@launch
+                }
+
+                val transcription = stt.transcribe(audioData)
+
+                if (transcription.isNullOrBlank()) {
+                    Log.w(TAG, "No transcription returned")
+                    voiceStatus = "No speech detected"
+                } else {
+                    Log.d(TAG, "Transcription: $transcription")
+                    voiceStatus = "Sending..."
+                    sendMessage(transcription)
+                    voiceStatus = "Sent: $transcription"
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Transcription failed: ${e.message}", e)
+                voiceStatus = "Transcription failed"
+            }
+        }
+
+        // Clear buffer for next recording
+        streamer.clearBuffer()
     }
 
     // Touch callback extending Mercury SDK's CommonTouchCallback
@@ -162,36 +468,74 @@ class ARActivity : ComponentActivity() {
 
     // Gesture handlers
     private fun handleClick() {
-        if (inputText.isNotEmpty()) {
+        Log.d(TAG, "Click: isVoiceMode=$isVoiceMode, inputText='$inputText'")
+        if (isVoiceMode) {
+            // Exit voice mode on single click
+            stopListening()
+            isVoiceMode = false
+        } else if (inputText.isNotEmpty()) {
             sendMessage(inputText)
             inputText = ""
         }
     }
 
     private fun handleDoubleClick() {
+        Log.d(TAG, "Double-click: toggling voice mode")
         isVoiceMode = !isVoiceMode
+        if (isVoiceMode) {
+            // Start voice recognition
+            startListening()
+        } else {
+            // Stop voice recognition
+            stopListening()
+        }
     }
 
     private fun handleLongClick() {
+        Log.d(TAG, "Long-click: toggling settings")
         showSettings = !showSettings
     }
 
     private fun handleTripleClick() {
+        Log.d(TAG, "Triple-click: reconnecting")
         lifecycleScope.launch {
+            runtime.canvas.setStatus("Reconnecting...", "info")
             runtime.disconnect()
             runtime.connect()
         }
     }
 
     private fun handleSlideForward() {
+        Log.d(TAG, "Slide forward: scroll down")
         lifecycleScope.launch {
             runtime.canvas.eval("window.scrollBy(0, 100)")
         }
     }
 
     private fun handleSlideBackward() {
+        Log.d(TAG, "Slide backward: scroll up")
         lifecycleScope.launch {
             runtime.canvas.eval("window.scrollBy(0, -100)")
+        }
+    }
+
+    /**
+     * Mirrors content to both lenses by rendering two identical side-by-side views.
+     * This matches how BaseMirrorActivity in Mercury SDK works.
+     */
+    @Composable
+    private fun MirroredDisplay(content: @Composable () -> Unit) {
+        Row(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            // Left lens
+            Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                content()
+            }
+            // Right lens
+            Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                content()
+            }
         }
     }
 
@@ -225,6 +569,7 @@ class ARActivity : ComponentActivity() {
                 InputOverlay(
                     text = inputText,
                     isVoiceMode = isVoiceMode,
+                    voiceStatusText = voiceStatus,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 16.dp)
@@ -270,15 +615,15 @@ class ARActivity : ComponentActivity() {
 
             Box(
                 modifier = Modifier
-                    .size(8.dp)
-                    .clip(RoundedCornerShape(4.dp))
+                    .size(14.dp)
+                    .clip(RoundedCornerShape(7.dp))
                     .background(indicatorColor)
             )
 
             Text(
                 text = statusMessage,
                 color = Color.White,
-                fontSize = 14.sp,
+                fontSize = 24.sp,
                 fontWeight = FontWeight.Medium
             )
         }
@@ -288,6 +633,7 @@ class ARActivity : ComponentActivity() {
     private fun InputOverlay(
         text: String,
         isVoiceMode: Boolean,
+        voiceStatusText: String,
         modifier: Modifier = Modifier
     ) {
         Row(
@@ -306,16 +652,16 @@ class ARActivity : ComponentActivity() {
                         .background(Color(0xFF00AAFF))
                 )
                 Text(
-                    text = "Listening...",
+                    text = voiceStatusText,
                     color = Color(0xFF00AAFF),
-                    fontSize = 16.sp,
+                    fontSize = 28.sp,
                     fontWeight = FontWeight.Medium
                 )
             } else {
                 Text(
                     text = text,
                     color = Color.White,
-                    fontSize = 16.sp
+                    fontSize = 28.sp
                 )
             }
         }
@@ -342,7 +688,7 @@ class ARActivity : ComponentActivity() {
                 Text(
                     text = "ClawdAR Settings",
                     color = Color.White,
-                    fontSize = 20.sp,
+                    fontSize = 32.sp,
                     fontWeight = FontWeight.Bold
                 )
 
@@ -353,9 +699,10 @@ class ARActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Connection", color = Color(0xFFAAAAAA))
+                    Text("Connection", color = Color(0xFFAAAAAA), fontSize = 22.sp)
                     Text(
                         text = connectionState.name,
+                        fontSize = 22.sp,
                         color = when (connectionState) {
                             ConnectionState.CONNECTED -> Color(0xFF00FF88)
                             ConnectionState.CONNECTING -> Color(0xFFFFAA00)
@@ -388,15 +735,15 @@ class ARActivity : ComponentActivity() {
     private fun GestureHint(modifier: Modifier = Modifier) {
         Column(
             modifier = modifier
-                .clip(RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .background(Color(0x44000000))
-                .padding(8.dp),
+                .padding(12.dp),
             horizontalAlignment = Alignment.End
         ) {
-            Text("Temple Gestures", color = Color(0x88FFFFFF), fontSize = 10.sp, fontWeight = FontWeight.Medium)
-            Text("Click: Confirm", color = Color(0x66FFFFFF), fontSize = 9.sp)
-            Text("2x: Voice", color = Color(0x66FFFFFF), fontSize = 9.sp)
-            Text("Hold: Settings", color = Color(0x66FFFFFF), fontSize = 9.sp)
+            Text("Temple Gestures", color = Color(0x88FFFFFF), fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Text("Click: Confirm", color = Color(0x66FFFFFF), fontSize = 16.sp)
+            Text("2x: Voice", color = Color(0x66FFFFFF), fontSize = 16.sp)
+            Text("Hold: Settings", color = Color(0x66FFFFFF), fontSize = 16.sp)
         }
     }
 
@@ -409,16 +756,30 @@ class ARActivity : ComponentActivity() {
         AndroidView(
             factory = { ctx ->
                 WebView(ctx).apply {
+                    // Force WebView to fill its parent
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         allowFileAccess = true
                         mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        // Force WebView to use its actual width, not device width
+                        useWideViewPort = false
+                        loadWithOverviewMode = false
                     }
                     setBackgroundColor(android.graphics.Color.BLACK)
                     webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            Log.d(TAG, "Page started loading: $url")
+                        }
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            Log.d(TAG, "Page loaded: $url")
+                            Log.d(TAG, "Page loaded: $url, WebView size: ${view?.width}x${view?.height}")
+                        }
+                        override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                            Log.e(TAG, "WebView error: $errorCode - $description at $failingUrl")
                         }
                     }
                     webChromeClient = object : WebChromeClient() {
@@ -440,7 +801,7 @@ class ARActivity : ComponentActivity() {
             },
             modifier = modifier,
             onRelease = { webView ->
-                canvasController.detach()
+                canvasController.detach(webView)
                 webView.destroy()
             }
         )
@@ -467,10 +828,22 @@ class ARActivity : ComponentActivity() {
     private fun sendMessage(text: String) {
         lifecycleScope.launch {
             try {
+                Log.d(TAG, "sendMessage called with: $text")
+
+                // Track current user message for display with AI response
+                runtime.setCurrentUserMessage(text)
+
+                // Show the message on canvas with "thinking" indicator
+                val msgJson = """[{"type":"text","content":"You: $text"},{"type":"text","content":"Thinking..."}]"""
+                Log.d(TAG, "Pushing to canvas: $msgJson")
+                runtime.canvas.pushA2UIMessages(msgJson)
+                Log.d(TAG, "Canvas push completed")
+
                 runtime.bridge.sendChatMessage(text)
-                runtime.canvas.setStatus("Sent: $text", "info")
+                runtime.canvas.setStatus("Sent", "info")
+                Log.d(TAG, "Message sent to gateway: $text")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to send message: ${e.message}")
+                Log.e(TAG, "Failed to send message: ${e.message}", e)
                 runtime.canvas.setStatus("Send failed", "error")
             }
         }
@@ -478,6 +851,10 @@ class ARActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        speechRecognizer?.destroy()
+        speechRecognizer = null
+        audioStreamer?.release()
+        audioStreamer = null
         runtime.cleanup()
     }
 }

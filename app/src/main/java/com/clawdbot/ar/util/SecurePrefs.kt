@@ -102,11 +102,25 @@ class SecurePrefs(context: Context) {
         setBridgeToken(null)
     }
 
+    // Chat session key - persisted to maintain conversation continuity
+    fun getChatSessionKey(): String? {
+        return prefs.getString(KEY_CHAT_SESSION, null)
+    }
+
+    fun setChatSessionKey(key: String) {
+        prefs.edit().putString(KEY_CHAT_SESSION, key).apply()
+    }
+
+    fun clearChatSession() {
+        prefs.edit().remove(KEY_CHAT_SESSION).apply()
+    }
+
     companion object {
         private const val KEY_INSTANCE_ID = "instance_id"
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_BRIDGE_TOKEN = "bridge_token"
         private const val KEY_MANUAL_HOST = "manual_host"
         private const val KEY_MANUAL_PORT = "manual_port"
+        private const val KEY_CHAT_SESSION = "chat_session_key"
     }
 }

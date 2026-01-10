@@ -37,10 +37,13 @@ class NodeRuntime(private val context: Context) {
         // Observe bridge connection state
         scope.launch {
             bridge.isConnected.collect { connected ->
-                _connectionState.value = if (connected) {
-                    ConnectionState.CONNECTED
-                } else {
-                    ConnectionState.DISCONNECTED
+                if (connected) {
+                    _connectionState.value = ConnectionState.CONNECTED
+                    _statusMessage.value = "Connected"
+                } else if (_connectionState.value == ConnectionState.CONNECTED) {
+                    // Only update to disconnected if we were previously connected
+                    _connectionState.value = ConnectionState.DISCONNECTED
+                    _statusMessage.value = "Disconnected"
                 }
             }
         }
@@ -49,6 +52,63 @@ class NodeRuntime(private val context: Context) {
         scope.launch {
             bridge.incomingCommands.collect { (id, command, paramsJson) ->
                 handleCommand(id, command, paramsJson)
+            }
+        }
+
+        // Handle chat events (streaming AI responses)
+        scope.launch {
+            bridge.chatEvents.collect { event ->
+                handleChatEvent(event)
+            }
+        }
+    }
+
+    // Track current user message for display
+    private var currentUserMessage: String? = null
+
+    /**
+     * Set the current user message (for display alongside AI response).
+     */
+    fun setCurrentUserMessage(message: String) {
+        currentUserMessage = message
+    }
+
+    /**
+     * Handle chat events from gateway.
+     */
+    private suspend fun handleChatEvent(event: BridgeSession.ChatEvent) {
+        when (event) {
+            is BridgeSession.ChatEvent.AgentText -> {
+                // Update canvas with streaming AI text
+                val userMsg = currentUserMessage ?: ""
+                val msgJson = buildJsonArray {
+                    if (userMsg.isNotEmpty()) {
+                        add(buildJsonObject {
+                            put("type", "text")
+                            put("content", "You: $userMsg")
+                        })
+                    }
+                    add(buildJsonObject {
+                        put("type", "markdown")
+                        put("content", event.text)
+                    })
+                }.toString()
+                canvas.pushA2UIMessages(msgJson)
+            }
+
+            is BridgeSession.ChatEvent.ChatState -> {
+                when (event.state) {
+                    "final" -> {
+                        _statusMessage.value = "Done"
+                    }
+                    "error" -> {
+                        _statusMessage.value = "Error: ${event.errorMessage ?: "Unknown"}"
+                        canvas.setStatus("Error: ${event.errorMessage}", "error")
+                    }
+                    "aborted" -> {
+                        _statusMessage.value = "Aborted"
+                    }
+                }
             }
         }
     }
