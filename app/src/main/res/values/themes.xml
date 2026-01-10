@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base theme for ClawdAR - using AppCompat for Mercury SDK compatibility -->
+    <style name="Theme.ClawdAR" parent="Theme.AppCompat.NoActionBar">
+        <item name="colorPrimary">@color/ar_primary</item>
+        <item name="colorPrimaryDark">@color/ar_primary_variant</item>
+        <item name="colorAccent">@color/ar_secondary</item>
+        <item name="android:colorBackground">@color/ar_background</item>
+        <item name="android:windowBackground">@color/ar_background</item>
+        <item name="android:textColor">@color/ar_on_background</item>
+    </style>
+
+    <!-- Immersive theme for AR activity -->
+    <style name="Theme.ClawdAR.Immersive" parent="Theme.ClawdAR">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="windowActionBar">false</item>
+    </style>
+</resources>

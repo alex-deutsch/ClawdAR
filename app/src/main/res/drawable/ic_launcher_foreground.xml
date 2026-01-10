@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- ClawdAR Logo - Stylized AR glasses with AI indicator -->
+    <group
+        android:translateX="27"
+        android:translateY="27">
+
+        <!-- Left lens -->
+        <path
+            android:fillColor="#00FF88"
+            android:pathData="M8,22 Q8,16 14,16 L22,16 Q28,16 28,22 L28,32 Q28,38 22,38 L14,38 Q8,38 8,32 Z"/>
+
+        <!-- Right lens -->
+        <path
+            android:fillColor="#00FF88"
+            android:pathData="M26,22 Q26,16 32,16 L40,16 Q46,16 46,22 L46,32 Q46,38 40,38 L32,38 Q26,38 26,32 Z"/>
+
+        <!-- Bridge -->
+        <path
+            android:fillColor="#00FF88"
+            android:pathData="M22,24 L32,24 L32,30 L22,30 Z"/>
+
+        <!-- Temple arms -->
+        <path
+            android:fillColor="#00AAFF"
+            android:strokeColor="#00AAFF"
+            android:strokeWidth="2"
+            android:pathData="M8,27 L2,27"/>
+
+        <path
+            android:fillColor="#00AAFF"
+            android:strokeColor="#00AAFF"
+            android:strokeWidth="2"
+            android:pathData="M46,27 L52,27"/>
+
+        <!-- AI indicator dot -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M27,42 m-3,0 a3,3 0 1,1 6,0 a3,3 0 1,1 -6,0"/>
+
+    </group>
+</vector>

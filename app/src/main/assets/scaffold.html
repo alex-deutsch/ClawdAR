@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ClawdAR Canvas</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            background: #000;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #status-container {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 24px;
+            background: rgba(26, 26, 26, 0.9);
+            border-radius: 24px;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        #status-container.visible {
+            opacity: 1;
+        }
+
+        #status-container.info {
+            color: #00FF88;
+        }
+
+        #status-container.error {
+            color: #FF4444;
+        }
+
+        #status-container.warning {
+            color: #FFAA00;
+        }
+
+        #welcome {
+            text-align: center;
+        }
+
+        #welcome h1 {
+            font-size: 32px;
+            font-weight: 300;
+            color: #00FF88;
+            margin-bottom: 16px;
+        }
+
+        #welcome p {
+            font-size: 16px;
+            color: #888;
+            line-height: 1.6;
+        }
+
+        /* A2UI Content Area */
+        #a2ui-root {
+            width: 100%;
+            height: 100%;
+            display: none;
+        }
+
+        #a2ui-root.active {
+            display: block;
+        }
+
+        /* Debug mode styling */
+        body.debug #debug-info {
+            display: block;
+        }
+
+        #debug-info {
+            display: none;
+            position: fixed;
+            top: 8px;
+            left: 8px;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #333;
+            border-radius: 4px;
+            font-size: 10px;
+            color: #888;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <div id="welcome">
+            <h1>ClawdAR</h1>
+            <p>Connected to ClawdBot Gateway</p>
+            <p style="margin-top: 8px; font-size: 12px; color: #555;">
+                Use temple gestures to interact
+            </p>
+        </div>
+    </div>
+
+    <div id="a2ui-root"></div>
+
+    <div id="status-container"></div>
+
+    <div id="debug-info">
+        <div>Debug Mode Active</div>
+    </div>
+
+    <script>
+        // ClawdAR Canvas API
+        (function() {
+            'use strict';
+
+            const statusContainer = document.getElementById('status-container');
+            const welcome = document.getElementById('welcome');
+            const a2uiRoot = document.getElementById('a2ui-root');
+
+            let statusTimeout = null;
+
+            // Global ClawdBot API
+            globalThis.__clawdbot = {
+                setStatus: function(text, type) {
+                    type = type || 'info';
+                    statusContainer.textContent = text;
+                    statusContainer.className = 'visible ' + type;
+
+                    clearTimeout(statusTimeout);
+                    statusTimeout = setTimeout(function() {
+                        statusContainer.classList.remove('visible');
+                    }, 3000);
+                },
+
+                setDebugStatusEnabled: function(enabled) {
+                    document.body.classList.toggle('debug', enabled);
+                },
+
+                hideWelcome: function() {
+                    welcome.style.display = 'none';
+                },
+
+                showWelcome: function() {
+                    welcome.style.display = 'block';
+                }
+            };
+
+            // A2UI API (Agent-to-UI)
+            globalThis.clawdbotA2UI = {
+                applyMessages: function(messagesJson) {
+                    try {
+                        const messages = JSON.parse(messagesJson);
+                        // Simple rendering - display as formatted text
+                        a2uiRoot.classList.add('active');
+                        welcome.style.display = 'none';
+
+                        // Process messages
+                        let html = '';
+                        if (Array.isArray(messages)) {
+                            messages.forEach(function(msg) {
+                                if (msg.type === 'text') {
+                                    html += '<div style="padding: 16px; color: #fff;">' +
+                                            escapeHtml(msg.content || '') + '</div>';
+                                } else if (msg.type === 'markdown') {
+                                    html += '<div style="padding: 16px; color: #fff;">' +
+                                            simpleMarkdown(msg.content || '') + '</div>';
+                                }
+                            });
+                        } else if (typeof messages === 'string') {
+                            html = '<div style="padding: 16px; color: #fff;">' +
+                                   simpleMarkdown(messages) + '</div>';
+                        }
+
+                        a2uiRoot.innerHTML = html;
+                        return true;
+                    } catch (e) {
+                        console.error('A2UI error:', e);
+                        return false;
+                    }
+                },
+
+                reset: function() {
+                    a2uiRoot.innerHTML = '';
+                    a2uiRoot.classList.remove('active');
+                    welcome.style.display = 'block';
+                }
+            };
+
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            function simpleMarkdown(text) {
+                return escapeHtml(text)
+                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                    .replace(/`(.*?)`/g, '<code style="background:#333;padding:2px 4px;border-radius:2px;">$1</code>')
+                    .replace(/\n/g, '<br>');
+            }
+
+            // Ready notification
+            console.log('ClawdAR Canvas ready');
+
+            // Notify Android that page is ready
+            if (window.__clawdbotAndroid) {
+                window.__clawdbotAndroid.onA2UIAction(JSON.stringify({ type: 'ready' }));
+            }
+        })();
+    </script>
+</body>
+</html>

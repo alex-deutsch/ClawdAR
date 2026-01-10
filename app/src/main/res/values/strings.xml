@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ClawdAR</string>
+    <string name="notification_channel_name">ClawdAR Connection</string>
+    <string name="notification_channel_description">Maintains connection to ClawdBot gateway</string>
+    <string name="notification_title">ClawdAR Active</string>
+    <string name="notification_text_connected">Connected to gateway</string>
+    <string name="notification_text_connecting">Connecting...</string>
+    <string name="notification_text_disconnected">Disconnected</string>
+</resources>

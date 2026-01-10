@@ -1,0 +1,32 @@
+# Gradle
+.gradle/
+build/
+**/build/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# Local configuration
+local.properties
+*.local
+
+# Signing keys
+*.jks
+*.keystore
+
+# Generated files
+*.apk
+*.aab
+*.dex
+*.class
+
+# Log files
+*.log
+
+# Temp files
+*.tmp
+*.temp
