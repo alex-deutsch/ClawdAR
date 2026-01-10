@@ -28,6 +28,7 @@ class BridgeSession(
         private const val RECONNECT_BASE_DELAY_MS = 350L
         private const val RECONNECT_MAX_DELAY_MS = 8000L
         private const val RECONNECT_MULTIPLIER = 1.7
+        private const val HEARTBEAT_INTERVAL_MS = 30000L // Send heartbeat every 30s
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -37,6 +38,7 @@ class BridgeSession(
     private var reader: BufferedReader? = null
     private var writer: BufferedWriter? = null
     private var connectionJob: Job? = null
+    private var heartbeatJob: Job? = null
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
@@ -84,6 +86,7 @@ class BridgeSession(
 
             socket = Socket().apply {
                 tcpNoDelay = true
+                keepAlive = true // Enable TCP keepalive
                 connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
                 soTimeout = READ_TIMEOUT_MS
             }
@@ -99,6 +102,9 @@ class BridgeSession(
                 readLoop()
             }
 
+            // Start heartbeat to keep connection alive
+            startHeartbeat()
+
             // Note: _isConnected will be set to true when we receive hello-ok or pair-ok
             reconnectAttempt = 0
             Log.d(TAG, "Socket connected to $host:$port, waiting for handshake...")
@@ -109,6 +115,36 @@ class BridgeSession(
             scheduleReconnect()
             throw e
         }
+    }
+
+    /**
+     * Start periodic heartbeat to keep connection alive.
+     */
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            while (isActive) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                if (_isConnected.value) {
+                    try {
+                        sendHeartbeat()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Heartbeat failed: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Send a heartbeat ping to gateway.
+     */
+    private suspend fun sendHeartbeat() {
+        val ping = buildJsonObject {
+            put("type", "ping")
+        }
+        sendMessage(ping.toString())
+        Log.d(TAG, "Heartbeat sent")
     }
 
     private suspend fun sendHello() {
@@ -257,6 +293,16 @@ class BridgeSession(
                 val ok = msg["ok"]?.jsonPrimitive?.booleanOrNull ?: false
                 val payload = msg["payloadJSON"]?.jsonPrimitive?.content
                 Log.d(TAG, "Received response: id=$id, ok=$ok, payload=$payload")
+            }
+
+            "pong" -> {
+                // Gateway responded to our ping
+                Log.d(TAG, "Received pong")
+            }
+
+            "tick" -> {
+                // Gateway heartbeat tick - connection is alive
+                Log.d(TAG, "Received tick")
             }
         }
     }
@@ -466,6 +512,8 @@ class BridgeSession(
      * Disconnect from gateway.
      */
     fun disconnect() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         connectionJob?.cancel()
         connectionJob = null
 

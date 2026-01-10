@@ -30,6 +30,10 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
+    <!-- Declare as glasses/TV app (not phone) -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
     <application
         android:name=".ClawdARApp"
         android:allowBackup="true"
@@ -38,7 +42,13 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.ClawdAR"
+        android:hardwareAccelerated="true"
         tools:targetApi="35">
+
+        <!-- RayNeo native glasses app marker -->
+        <meta-data
+            android:name="com.rayneo.mercury.app"
+            android:value="true" />
 
         <!-- Main AR Activity -->
         <activity
@@ -47,7 +57,8 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
-            android:theme="@style/Theme.ClawdAR.Immersive">
+            android:theme="@style/Theme.ClawdAR.Immersive"
+            android:banner="@mipmap/ic_launcher">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
