@@ -33,6 +33,14 @@ class NodeRuntime(private val context: Context) {
     private val _statusMessage = MutableStateFlow("Ready")
     val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
 
+    // Loading state for native UI
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
+    // Track when A2UI content is showing (for animation positioning)
+    private val _hasContent = MutableStateFlow(false)
+    val hasContent: StateFlow<Boolean> = _hasContent.asStateFlow()
+
     init {
         // Observe bridge connection state
         scope.launch {
@@ -68,9 +76,12 @@ class NodeRuntime(private val context: Context) {
 
     /**
      * Set the current user message (for display alongside AI response).
+     * Also shows loading indicator.
      */
     fun setCurrentUserMessage(message: String) {
         currentUserMessage = message
+        // Show loading when user sends a message
+        _isLoading.value = true
     }
 
     /**
@@ -79,6 +90,10 @@ class NodeRuntime(private val context: Context) {
     private suspend fun handleChatEvent(event: BridgeSession.ChatEvent) {
         when (event) {
             is BridgeSession.ChatEvent.AgentText -> {
+                // Hide loading when we get first response
+                _isLoading.value = false
+                // Mark that we have content showing
+                _hasContent.value = true
                 // Update canvas with streaming AI text
                 val userMsg = currentUserMessage ?: ""
                 val msgJson = buildJsonArray {
@@ -97,6 +112,8 @@ class NodeRuntime(private val context: Context) {
             }
 
             is BridgeSession.ChatEvent.ChatState -> {
+                // Hide loading on any terminal state
+                _isLoading.value = false
                 when (event.state) {
                     "final" -> {
                         _statusMessage.value = "Done"

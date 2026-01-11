@@ -79,6 +79,9 @@ dependencies {
     // WebView for Canvas
     implementation("androidx.webkit:webkit:1.13.0")
 
+    // Lottie for Compose
+    implementation("com.airbnb.android:lottie-compose:6.6.2")
+
     // Camera
     implementation("androidx.camera:camera-core:1.5.0")
     implementation("androidx.camera:camera-camera2:1.5.0")

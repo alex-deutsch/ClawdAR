@@ -31,6 +31,10 @@ class AudioStreamer(private val context: Context) {
         private const val SAMPLES_PER_CHUNK = SAMPLE_RATE * CHUNK_DURATION_MS / 1000
         private const val BYTES_PER_SAMPLE = 2 // 16-bit = 2 bytes
         private const val CHUNK_SIZE_BYTES = SAMPLES_PER_CHUNK * BYTES_PER_SAMPLE
+
+        // Maximum recording duration to prevent OOM (30 seconds)
+        private const val MAX_RECORDING_SECONDS = 30
+        private const val MAX_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * MAX_RECORDING_SECONDS
     }
 
     private var audioRecord: AudioRecord? = null
@@ -48,6 +52,7 @@ class AudioStreamer(private val context: Context) {
 
     // Buffer for collecting audio data for batch transcription
     private val audioBuffer = mutableListOf<ByteArray>()
+    private var totalBufferSize = 0
 
     /**
      * Check if we have microphone permission.
@@ -77,6 +82,7 @@ class AudioStreamer(private val context: Context) {
         // Clear audio buffer for new recording
         synchronized(audioBuffer) {
             audioBuffer.clear()
+            totalBufferSize = 0
         }
 
         val minBufferSize = AudioRecord.getMinBufferSize(
@@ -148,9 +154,21 @@ class AudioStreamer(private val context: Context) {
                         val rms = calculateRMS(buffer, bytesRead)
                         val hasVoice = rms > 500 // Threshold for voice detection
 
-                        // Buffer audio data for transcription
-                        synchronized(audioBuffer) {
-                            audioBuffer.add(buffer.copyOf(bytesRead))
+                        // Buffer audio data for transcription (with size limit)
+                        val bufferFull = synchronized(audioBuffer) {
+                            if (totalBufferSize + bytesRead <= MAX_BUFFER_BYTES) {
+                                audioBuffer.add(buffer.copyOf(bytesRead))
+                                totalBufferSize += bytesRead
+                                false
+                            } else {
+                                Log.w(TAG, "Max buffer size reached ($MAX_RECORDING_SECONDS seconds)")
+                                _status.value = "Max length reached"
+                                true
+                            }
+                        }
+                        if (bufferFull) {
+                            _isRecording.value = false
+                            break
                         }
 
                         val chunk = AudioChunk(
@@ -250,6 +268,7 @@ class AudioStreamer(private val context: Context) {
     fun clearBuffer() {
         synchronized(audioBuffer) {
             audioBuffer.clear()
+            totalBufferSize = 0
         }
     }
 

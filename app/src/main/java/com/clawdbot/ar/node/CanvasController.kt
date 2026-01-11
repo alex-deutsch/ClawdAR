@@ -224,4 +224,37 @@ class CanvasController {
 
         eval(js)
     }
+
+    /**
+     * Show loading overlay with animated GIF.
+     */
+    suspend fun showLoading(text: String = "Thinking...") {
+        val escapedText = text.replace("\"", "\\\"").replace("\n", "\\n")
+        val js = """
+            (function() {
+                if (typeof globalThis.__clawdbot !== 'undefined' &&
+                    typeof globalThis.__clawdbot.showLoading === 'function') {
+                    globalThis.__clawdbot.showLoading("$escapedText");
+                }
+            })();
+        """.trimIndent()
+
+        eval(js)
+    }
+
+    /**
+     * Hide loading overlay.
+     */
+    suspend fun hideLoading() {
+        val js = """
+            (function() {
+                if (typeof globalThis.__clawdbot !== 'undefined' &&
+                    typeof globalThis.__clawdbot.hideLoading === 'function') {
+                    globalThis.__clawdbot.hideLoading();
+                }
+            })();
+        """.trimIndent()
+
+        eval(js)
+    }
 }

@@ -22,6 +22,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import com.clawdbot.ar.R
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -33,6 +34,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.airbnb.lottie.compose.LottieAnimation
+import com.airbnb.lottie.compose.LottieCompositionSpec
+import com.airbnb.lottie.compose.LottieConstants
+import com.airbnb.lottie.compose.animateLottieCompositionAsState
+import com.airbnb.lottie.compose.rememberLottieComposition
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -90,6 +96,9 @@ class ARActivity : ComponentActivity() {
     private var inputText by mutableStateOf("")
     private var isVoiceMode by mutableStateOf(false)
     private var voiceStatus by mutableStateOf("Tap to speak")
+
+    // Bottom menu state: 0 = MIC, 1 = Settings
+    private var selectedMenuIndex by mutableStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -468,35 +477,40 @@ class ARActivity : ComponentActivity() {
 
     // Gesture handlers
     private fun handleClick() {
-        Log.d(TAG, "Click: isVoiceMode=$isVoiceMode, inputText='$inputText'")
-        if (isVoiceMode) {
-            // Exit voice mode on single click
-            stopListening()
-            isVoiceMode = false
-        } else if (inputText.isNotEmpty()) {
-            sendMessage(inputText)
-            inputText = ""
+        Log.d(TAG, "Click: selectedMenuIndex=$selectedMenuIndex, isVoiceMode=$isVoiceMode")
+
+        when (selectedMenuIndex) {
+            0 -> {
+                // MIC selected - toggle voice recording
+                if (isVoiceMode) {
+                    // Stop recording
+                    stopListening()
+                    isVoiceMode = false
+                } else {
+                    // Start recording
+                    isVoiceMode = true
+                    startListening()
+                }
+            }
+            1 -> {
+                // Settings selected - toggle settings panel
+                showSettings = !showSettings
+            }
         }
     }
 
     private fun handleDoubleClick() {
-        Log.d(TAG, "Double-click: toggling voice mode")
-        isVoiceMode = !isVoiceMode
-        if (isVoiceMode) {
-            // Start voice recognition
-            startListening()
-        } else {
-            // Stop voice recognition
-            stopListening()
-        }
+        // Reserved for system - do nothing
+        Log.d(TAG, "Double-click: reserved for system")
     }
 
     private fun handleLongClick() {
-        Log.d(TAG, "Long-click: toggling settings")
-        showSettings = !showSettings
+        // Reserved for system - do nothing
+        Log.d(TAG, "Long-click: reserved for system")
     }
 
     private fun handleTripleClick() {
+        // Triple-click: reconnect (useful for debugging)
         Log.d(TAG, "Triple-click: reconnecting")
         lifecycleScope.launch {
             runtime.canvas.setStatus("Reconnecting...", "info")
@@ -506,16 +520,18 @@ class ARActivity : ComponentActivity() {
     }
 
     private fun handleSlideForward() {
-        Log.d(TAG, "Slide forward: scroll down")
-        lifecycleScope.launch {
-            runtime.canvas.eval("window.scrollBy(0, 100)")
+        // Swipe forward: move selection right
+        Log.d(TAG, "Slide forward: next menu item")
+        if (selectedMenuIndex < 1) {
+            selectedMenuIndex++
         }
     }
 
     private fun handleSlideBackward() {
-        Log.d(TAG, "Slide backward: scroll up")
-        lifecycleScope.launch {
-            runtime.canvas.eval("window.scrollBy(0, -100)")
+        // Swipe backward: move selection left
+        Log.d(TAG, "Slide backward: previous menu item")
+        if (selectedMenuIndex > 0) {
+            selectedMenuIndex--
         }
     }
 
@@ -543,6 +559,8 @@ class ARActivity : ComponentActivity() {
     private fun ARScreen() {
         val connectionState by runtime.connectionState.collectAsState()
         val statusMessage by runtime.statusMessage.collectAsState()
+        val isLoading by runtime.isLoading.collectAsState()
+        val hasContent by runtime.hasContent.collectAsState()
 
         Box(
             modifier = Modifier
@@ -553,6 +571,18 @@ class ARActivity : ComponentActivity() {
             CanvasWebView(
                 modifier = Modifier.fillMaxSize(),
                 canvasController = runtime.canvas
+            )
+
+            // FireClawd animation - center when no content, bottom-left when content showing
+            FireClawdAnimation(
+                isPlaying = isLoading,
+                showThinkingText = isLoading,
+                isCompact = hasContent,
+                modifier = Modifier.align(
+                    if (hasContent) Alignment.BottomStart else Alignment.Center
+                ).then(
+                    if (hasContent) Modifier.padding(start = 16.dp, bottom = 70.dp) else Modifier
+                )
             )
 
             // Status bar overlay at top
@@ -584,12 +614,60 @@ class ARActivity : ComponentActivity() {
                 )
             }
 
-            // Gesture hint
-            GestureHint(
+            // Bottom menu bar
+            BottomMenuBar(
+                selectedIndex = selectedMenuIndex,
+                isVoiceActive = isVoiceMode,
+                voiceStatus = voiceStatus,
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(8.dp)
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 12.dp)
             )
+        }
+    }
+
+    @Composable
+    private fun FireClawdAnimation(
+        isPlaying: Boolean,
+        showThinkingText: Boolean,
+        isCompact: Boolean = false,
+        modifier: Modifier = Modifier
+    ) {
+        val compositionResult = rememberLottieComposition(
+            LottieCompositionSpec.RawRes(R.raw.flame)
+        )
+        val progress by animateLottieCompositionAsState(
+            composition = compositionResult.value,
+            iterations = LottieConstants.IterateForever,
+            isPlaying = isPlaying
+        )
+
+        // Log composition state for debugging
+        LaunchedEffect(compositionResult.isLoading, compositionResult.isFailure) {
+            Log.d("FireClawdAnimation", "Lottie loading=${compositionResult.isLoading}, failure=${compositionResult.isFailure}, error=${compositionResult.error}")
+        }
+
+        val animationSize = if (isCompact) 60.dp else 150.dp
+        val textSize = if (isCompact) 14.sp else 24.sp
+
+        Column(
+            modifier = modifier,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            LottieAnimation(
+                composition = compositionResult.value,
+                progress = { if (isPlaying) progress else 0f },
+                modifier = Modifier.size(animationSize)
+            )
+            if (showThinkingText) {
+                Spacer(modifier = Modifier.height(if (isCompact) 4.dp else 8.dp))
+                Text(
+                    text = "Thinking...",
+                    color = Color(0xFFFF6B35),
+                    fontSize = textSize,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
     }
 
@@ -732,18 +810,88 @@ class ARActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun GestureHint(modifier: Modifier = Modifier) {
-        Column(
+    private fun BottomMenuBar(
+        selectedIndex: Int,
+        isVoiceActive: Boolean,
+        voiceStatus: String,
+        modifier: Modifier = Modifier
+    ) {
+        Row(
             modifier = modifier
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0x44000000))
-                .padding(12.dp),
-            horizontalAlignment = Alignment.End
+                .clip(RoundedCornerShape(28.dp))
+                .background(Color(0xDD1A1A1A))
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Temple Gestures", color = Color(0x88FFFFFF), fontSize = 18.sp, fontWeight = FontWeight.Medium)
-            Text("Click: Confirm", color = Color(0x66FFFFFF), fontSize = 16.sp)
-            Text("2x: Voice", color = Color(0x66FFFFFF), fontSize = 16.sp)
-            Text("Hold: Settings", color = Color(0x66FFFFFF), fontSize = 16.sp)
+            // MIC button
+            MenuIcon(
+                icon = "🎤",
+                label = if (isVoiceActive) voiceStatus else "Voice",
+                isSelected = selectedIndex == 0,
+                isActive = isVoiceActive,
+                activeColor = Color(0xFF00AAFF)
+            )
+
+            // Divider
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(32.dp)
+                    .background(Color(0x44FFFFFF))
+            )
+
+            // Settings button
+            MenuIcon(
+                icon = "⚙️",
+                label = "Settings",
+                isSelected = selectedIndex == 1,
+                isActive = false,
+                activeColor = Color(0xFFFF6B35)
+            )
+        }
+    }
+
+    @Composable
+    private fun MenuIcon(
+        icon: String,
+        label: String,
+        isSelected: Boolean,
+        isActive: Boolean,
+        activeColor: Color
+    ) {
+        val backgroundColor = when {
+            isActive -> activeColor.copy(alpha = 0.3f)
+            isSelected -> Color(0x44FFFFFF)
+            else -> Color.Transparent
+        }
+        val textColor = when {
+            isActive -> activeColor
+            isSelected -> Color.White
+            else -> Color(0x88FFFFFF)
+        }
+
+        Column(
+            modifier = Modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(backgroundColor)
+                .then(
+                    if (isSelected) Modifier.padding(1.dp) else Modifier
+                )
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = icon,
+                fontSize = 28.sp
+            )
+            Text(
+                text = label,
+                color = textColor,
+                fontSize = 16.sp,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1
+            )
         }
     }
 
@@ -830,7 +978,7 @@ class ARActivity : ComponentActivity() {
             try {
                 Log.d(TAG, "sendMessage called with: $text")
 
-                // Track current user message for display with AI response
+                // Track current user message (also triggers loading state)
                 runtime.setCurrentUserMessage(text)
 
                 // Show the message on canvas with "thinking" indicator
