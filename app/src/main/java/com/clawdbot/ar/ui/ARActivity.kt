@@ -49,6 +49,7 @@ import com.clawdbot.ar.ClawdARApp
 import com.clawdbot.ar.ConnectionState
 import com.clawdbot.ar.audio.AudioStreamer
 import com.clawdbot.ar.audio.ElevenLabsSTT
+import com.clawdbot.ar.camera.CameraCapture
 import com.clawdbot.ar.ui.theme.ClawdARTheme
 import com.ffalcon.mercury.android.sdk.touch.CommonTouchCallback
 import com.ffalcon.mercury.android.sdk.touch.FlingArgs
@@ -88,6 +89,10 @@ class ARActivity : ComponentActivity() {
     private var audioStreamJob: Job? = null
     private var elevenLabsSTT: ElevenLabsSTT? = null
 
+    // Camera capture
+    private var cameraCapture: CameraCapture? = null
+    private var isCameraInitialized = false
+
     // ElevenLabs API key
     private val elevenLabsApiKey = "sk_bf29f6d10be2ae94e488c865eea47633cd6a15a006d687e1"
 
@@ -96,8 +101,10 @@ class ARActivity : ComponentActivity() {
     private var inputText by mutableStateOf("")
     private var isVoiceMode by mutableStateOf(false)
     private var voiceStatus by mutableStateOf("Tap to speak")
+    private var isCameraMode by mutableStateOf(false)
+    private var cameraStatus by mutableStateOf("Tap to capture")
 
-    // Bottom menu state: 0 = MIC, 1 = Settings
+    // Bottom menu state: 0 = MIC, 1 = Camera, 2 = Settings
     private var selectedMenuIndex by mutableStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -329,15 +336,29 @@ class ARActivity : ComponentActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 100 && grantResults.isNotEmpty() &&
-            grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            Log.d(TAG, "Mic permission granted, starting listening")
-            // Permission granted, start listening
-            startListening()
-        } else {
-            Log.e(TAG, "Mic permission denied")
-            voiceStatus = "Mic denied"
-            isVoiceMode = false
+        when (requestCode) {
+            100 -> {
+                // Microphone permission
+                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    Log.d(TAG, "Mic permission granted, starting listening")
+                    startListening()
+                } else {
+                    Log.e(TAG, "Mic permission denied")
+                    voiceStatus = "Mic denied"
+                    isVoiceMode = false
+                }
+            }
+            101 -> {
+                // Camera permission
+                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    Log.d(TAG, "Camera permission granted, capturing photo")
+                    captureAndSendPhoto()
+                } else {
+                    Log.e(TAG, "Camera permission denied")
+                    cameraStatus = "Camera denied"
+                    isCameraMode = false
+                }
+            }
         }
     }
 
@@ -410,6 +431,85 @@ class ARActivity : ComponentActivity() {
         streamer.clearBuffer()
     }
 
+    /**
+     * Capture a photo and send it to the AI assistant.
+     */
+    private fun captureAndSendPhoto() {
+        Log.d(TAG, "captureAndSendPhoto called")
+
+        // Check camera permission
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED) {
+            cameraStatus = "Requesting camera..."
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 101)
+            return
+        }
+
+        isCameraMode = true
+        cameraStatus = "Initializing..."
+
+        lifecycleScope.launch {
+            try {
+                // Initialize camera if needed
+                if (cameraCapture == null) {
+                    cameraCapture = CameraCapture(this@ARActivity)
+                }
+
+                if (!isCameraInitialized) {
+                    cameraStatus = "Starting camera..."
+                    val initialized = cameraCapture?.initialize(this@ARActivity)
+                    if (initialized != true) {
+                        Log.e(TAG, "Failed to initialize camera")
+                        cameraStatus = "Camera init failed"
+                        isCameraMode = false
+                        return@launch
+                    }
+                    isCameraInitialized = true
+                }
+
+                // Capture photo
+                cameraStatus = "Capturing..."
+                val result = cameraCapture?.capturePhoto()
+
+                if (result == null) {
+                    Log.e(TAG, "Photo capture failed")
+                    cameraStatus = "Capture failed"
+                    isCameraMode = false
+                    return@launch
+                }
+
+                Log.d(TAG, "Photo captured: ${result.width}x${result.height}, ${result.base64.length} chars")
+                cameraStatus = "Sending..."
+
+                // Show the photo on canvas with loading indicator
+                runtime.setCurrentUserMessage("[Photo captured]")
+                val msgJson = """[{"type":"text","content":"You: [Photo sent]"},{"type":"text","content":"Analyzing image..."}]"""
+                runtime.canvas.pushA2UIMessages(msgJson)
+
+                // Send to AI with a default prompt
+                runtime.bridge.sendChatMessageWithImage(
+                    text = "What do you see in this image?",
+                    imageBase64 = result.base64,
+                    imageMimeType = result.mimeType
+                )
+
+                cameraStatus = "Sent!"
+                runtime.canvas.setStatus("Photo sent", "info")
+                Log.d(TAG, "Photo sent to AI")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Camera capture error: ${e.message}", e)
+                cameraStatus = "Error: ${e.message}"
+                runtime.canvas.setStatus("Camera error", "error")
+            } finally {
+                // Reset camera mode after a delay
+                kotlinx.coroutines.delay(2000)
+                isCameraMode = false
+                cameraStatus = "Tap to capture"
+            }
+        }
+    }
+
     // Touch callback extending Mercury SDK's CommonTouchCallback
     private val touchCallback = object : CommonTouchCallback() {
         override fun onTPClick(): Boolean {
@@ -477,7 +577,7 @@ class ARActivity : ComponentActivity() {
 
     // Gesture handlers
     private fun handleClick() {
-        Log.d(TAG, "Click: selectedMenuIndex=$selectedMenuIndex, isVoiceMode=$isVoiceMode")
+        Log.d(TAG, "Click: selectedMenuIndex=$selectedMenuIndex, isVoiceMode=$isVoiceMode, isCameraMode=$isCameraMode")
 
         when (selectedMenuIndex) {
             0 -> {
@@ -493,6 +593,10 @@ class ARActivity : ComponentActivity() {
                 }
             }
             1 -> {
+                // Camera selected - capture photo
+                captureAndSendPhoto()
+            }
+            2 -> {
                 // Settings selected - toggle settings panel
                 showSettings = !showSettings
             }
@@ -522,7 +626,7 @@ class ARActivity : ComponentActivity() {
     private fun handleSlideForward() {
         // Swipe forward: move selection right
         Log.d(TAG, "Slide forward: next menu item")
-        if (selectedMenuIndex < 1) {
+        if (selectedMenuIndex < 2) {
             selectedMenuIndex++
         }
     }
@@ -619,6 +723,8 @@ class ARActivity : ComponentActivity() {
                 selectedIndex = selectedMenuIndex,
                 isVoiceActive = isVoiceMode,
                 voiceStatus = voiceStatus,
+                isCameraActive = isCameraMode,
+                cameraStatusText = cameraStatus,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 12.dp)
@@ -814,6 +920,8 @@ class ARActivity : ComponentActivity() {
         selectedIndex: Int,
         isVoiceActive: Boolean,
         voiceStatus: String,
+        isCameraActive: Boolean,
+        cameraStatusText: String,
         modifier: Modifier = Modifier
     ) {
         Row(
@@ -821,7 +929,7 @@ class ARActivity : ComponentActivity() {
                 .clip(RoundedCornerShape(28.dp))
                 .background(Color(0xDD1A1A1A))
                 .padding(horizontal = 8.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // MIC button
@@ -841,11 +949,28 @@ class ARActivity : ComponentActivity() {
                     .background(Color(0x44FFFFFF))
             )
 
+            // Camera button
+            MenuIcon(
+                icon = "📷",
+                label = if (isCameraActive) cameraStatusText else "Photo",
+                isSelected = selectedIndex == 1,
+                isActive = isCameraActive,
+                activeColor = Color(0xFF00FF88)
+            )
+
+            // Divider
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(32.dp)
+                    .background(Color(0x44FFFFFF))
+            )
+
             // Settings button
             MenuIcon(
                 icon = "⚙️",
                 label = "Settings",
-                isSelected = selectedIndex == 1,
+                isSelected = selectedIndex == 2,
                 isActive = false,
                 activeColor = Color(0xFFFF6B35)
             )
@@ -1003,6 +1128,8 @@ class ARActivity : ComponentActivity() {
         speechRecognizer = null
         audioStreamer?.release()
         audioStreamer = null
+        cameraCapture?.release()
+        cameraCapture = null
         runtime.cleanup()
     }
 }

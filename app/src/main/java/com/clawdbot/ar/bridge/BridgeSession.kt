@@ -37,7 +37,8 @@ class BridgeSession(
     private var socket: Socket? = null
     private var reader: BufferedReader? = null
     private var writer: BufferedWriter? = null
-    private var connectionJob: Job? = null
+    private var readJob: Job? = null
+    private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
 
     private val _isConnected = MutableStateFlow(false)
@@ -54,11 +55,62 @@ class BridgeSession(
     // Chat event types
     sealed class ChatEvent {
         data class AgentText(val runId: String, val text: String) : ChatEvent()
+        data class AgentContent(val runId: String, val content: List<ContentBlock>) : ChatEvent()
         data class ChatState(val runId: String?, val state: String, val errorMessage: String?) : ChatEvent()
     }
 
+    // Content block types (text, image, etc.)
+    data class ContentBlock(
+        val type: String,
+        val text: String? = null,
+        val mimeType: String? = null,
+        val base64: String? = null
+    )
+
     private var currentEndpoint: BridgeEndpoint? = null
     private var reconnectAttempt = 0
+
+    /**
+     * Parse a content block from JSON (text, image, etc.)
+     */
+    private fun parseContentBlock(element: JsonElement): ContentBlock? {
+        val obj = element.jsonObject
+        val type = obj["type"]?.jsonPrimitive?.content ?: "text"
+
+        return when (type) {
+            "text" -> {
+                val text = obj["text"]?.jsonPrimitive?.content ?: return null
+                ContentBlock(type = "text", text = text)
+            }
+            "image" -> {
+                // Image can have url, data (base64), or content (base64)
+                val mimeType = obj["mimeType"]?.jsonPrimitive?.content
+                    ?: obj["media_type"]?.jsonPrimitive?.content
+                val base64 = obj["content"]?.jsonPrimitive?.content
+                    ?: obj["data"]?.jsonPrimitive?.content
+                    ?: obj["base64"]?.jsonPrimitive?.content
+                val url = obj["url"]?.jsonPrimitive?.content
+
+                // If we have a URL but no base64, store URL in text field for rendering
+                if (base64 != null) {
+                    ContentBlock(type = "image", mimeType = mimeType, base64 = base64)
+                } else if (url != null) {
+                    ContentBlock(type = "image", text = url, mimeType = mimeType)
+                } else {
+                    null
+                }
+            }
+            else -> {
+                // For unknown types, try to extract text
+                val text = obj["text"]?.jsonPrimitive?.content
+                if (text != null) {
+                    ContentBlock(type = "text", text = text)
+                } else {
+                    null
+                }
+            }
+        }
+    }
 
     /**
      * Connect to a discovered endpoint.
@@ -79,7 +131,8 @@ class BridgeSession(
     }
 
     private suspend fun connectInternal(host: String, port: Int) = withContext(Dispatchers.IO) {
-        disconnect()
+        // Close existing connection but don't cancel reconnect job
+        closeConnection()
 
         try {
             Log.d(TAG, "Connecting to $host:$port...")
@@ -98,7 +151,7 @@ class BridgeSession(
             sendHello()
 
             // Start reading messages
-            connectionJob = scope.launch(Dispatchers.IO) {
+            readJob = scope.launch(Dispatchers.IO) {
                 readLoop()
             }
 
@@ -248,7 +301,7 @@ class BridgeSession(
 
                 when (event) {
                     "agent" -> {
-                        // Streaming AI response text
+                        // Streaming AI response - can include text and images
                         if (payloadJson != null) {
                             try {
                                 val payload = json.parseToJsonElement(payloadJson).jsonObject
@@ -256,15 +309,50 @@ class BridgeSession(
                                 val stream = payload["stream"]?.jsonPrimitive?.content
                                 val data = payload["data"]?.jsonObject
 
-                                if (stream == "assistant" && data != null) {
-                                    val text = data["text"]?.jsonPrimitive?.content
-                                    if (text != null) {
-                                        Log.d(TAG, "Agent text update: $text")
-                                        _chatEvents.emit(ChatEvent.AgentText(runId, text))
+                                Log.d(TAG, "Agent event stream=$stream, data keys=${data?.keys}")
+
+                                when (stream) {
+                                    "assistant" -> {
+                                        if (data != null) {
+                                            // Check for content array (new format with images)
+                                            val contentArray = data["content"]?.jsonArray
+                                            if (contentArray != null && contentArray.isNotEmpty()) {
+                                                val blocks = contentArray.mapNotNull { parseContentBlock(it) }
+                                                if (blocks.isNotEmpty()) {
+                                                    Log.d(TAG, "Agent content: ${blocks.size} blocks, types=${blocks.map { it.type }}")
+                                                    _chatEvents.emit(ChatEvent.AgentContent(runId, blocks))
+                                                }
+                                            } else {
+                                                // Fallback to simple text
+                                                val text = data["text"]?.jsonPrimitive?.content
+                                                if (text != null) {
+                                                    Log.d(TAG, "Agent text update: $text")
+                                                    _chatEvents.emit(ChatEvent.AgentText(runId, text))
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "tool" -> {
+                                        // Tool results may contain images
+                                        if (data != null) {
+                                            Log.d(TAG, "Tool event data: $data")
+                                            // Check for result with content array
+                                            val result = data["result"]?.jsonObject
+                                            val contentArray = result?.get("content")?.jsonArray
+                                                ?: data["content"]?.jsonArray
+                                            if (contentArray != null) {
+                                                val blocks = contentArray.mapNotNull { parseContentBlock(it) }
+                                                val imageBlocks = blocks.filter { it.type == "image" }
+                                                if (imageBlocks.isNotEmpty()) {
+                                                    Log.d(TAG, "Tool has ${imageBlocks.size} images!")
+                                                    _chatEvents.emit(ChatEvent.AgentContent(runId, imageBlocks))
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             } catch (e: Exception) {
-                                Log.e(TAG, "Error parsing agent event: ${e.message}")
+                                Log.e(TAG, "Error parsing agent event: ${e.message}", e)
                             }
                         }
                     }
@@ -393,6 +481,20 @@ class BridgeSession(
      * Send a chat message to gateway.
      */
     suspend fun sendChatMessage(text: String): String {
+        return sendChatMessageWithImage(text, null, null)
+    }
+
+    /**
+     * Send a chat message with an optional image to gateway.
+     * @param text The text message
+     * @param imageBase64 Optional base64-encoded image data
+     * @param imageMimeType Optional MIME type (e.g., "image/jpeg")
+     */
+    suspend fun sendChatMessageWithImage(
+        text: String,
+        imageBase64: String?,
+        imageMimeType: String?
+    ): String {
         // Ensure we're subscribed to receive response events
         subscribeToChatEvents()
 
@@ -407,10 +509,23 @@ class BridgeSession(
                 put("sessionKey", chatSessionKey)
                 put("message", text)
                 put("idempotencyKey", idempotencyKey)
+                // Include image as attachment if provided
+                if (imageBase64 != null && imageMimeType != null) {
+                    putJsonArray("attachments") {
+                        add(buildJsonObject {
+                            put("type", "image")
+                            put("mimeType", imageMimeType)
+                            put("fileName", "photo.jpg")
+                            // Content should be data URL format
+                            put("content", "data:$imageMimeType;base64,$imageBase64")
+                        })
+                    }
+                }
             }.toString())
         }
 
         sendMessage(request.toString())
+        Log.d(TAG, "Sent chat message with attachment: ${imageBase64 != null}")
         return requestId
     }
 
@@ -489,8 +604,9 @@ class BridgeSession(
     private fun scheduleReconnect() {
         val endpoint = currentEndpoint ?: return
 
-        connectionJob?.cancel()
-        connectionJob = scope.launch {
+        // Cancel any pending reconnect, but don't cancel read job here
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
             val delay = (RECONNECT_BASE_DELAY_MS *
                     RECONNECT_MULTIPLIER.pow(reconnectAttempt.toDouble()))
                 .toLong()
@@ -509,13 +625,14 @@ class BridgeSession(
     }
 
     /**
-     * Disconnect from gateway.
+     * Close socket and streams without cancelling reconnect.
+     * Used internally during reconnection attempts.
      */
-    fun disconnect() {
+    private fun closeConnection() {
         heartbeatJob?.cancel()
         heartbeatJob = null
-        connectionJob?.cancel()
-        connectionJob = null
+        readJob?.cancel()
+        readJob = null
 
         try {
             writer?.close()
@@ -528,6 +645,18 @@ class BridgeSession(
         writer = null
         reader = null
         socket = null
+    }
+
+    /**
+     * Disconnect from gateway and stop reconnection attempts.
+     */
+    fun disconnect() {
+        // Cancel reconnect attempts
+        reconnectJob?.cancel()
+        reconnectJob = null
+        currentEndpoint = null
+
+        closeConnection()
         _isConnected.value = false
     }
 }

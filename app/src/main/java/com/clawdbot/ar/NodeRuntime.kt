@@ -111,6 +111,42 @@ class NodeRuntime(private val context: Context) {
                 canvas.pushA2UIMessages(msgJson)
             }
 
+            is BridgeSession.ChatEvent.AgentContent -> {
+                // Hide loading when we get first response
+                _isLoading.value = false
+                // Mark that we have content showing
+                _hasContent.value = true
+                // Convert content blocks to A2UI messages
+                val userMsg = currentUserMessage ?: ""
+                val msgJson = buildJsonArray {
+                    if (userMsg.isNotEmpty()) {
+                        add(buildJsonObject {
+                            put("type", "text")
+                            put("content", "You: $userMsg")
+                        })
+                    }
+                    for (block in event.content) {
+                        add(buildJsonObject {
+                            put("type", block.type)
+                            when (block.type) {
+                                "text" -> put("content", block.text ?: "")
+                                "image" -> {
+                                    // Use base64 data URL or regular URL
+                                    if (block.base64 != null) {
+                                        val mimeType = block.mimeType ?: "image/png"
+                                        put("url", "data:$mimeType;base64,${block.base64}")
+                                    } else if (block.text != null) {
+                                        put("url", block.text)
+                                    }
+                                }
+                                else -> put("content", block.text ?: "")
+                            }
+                        })
+                    }
+                }.toString()
+                canvas.pushA2UIMessages(msgJson)
+            }
+
             is BridgeSession.ChatEvent.ChatState -> {
                 // Hide loading on any terminal state
                 _isLoading.value = false

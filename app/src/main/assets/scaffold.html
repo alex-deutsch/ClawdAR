@@ -235,6 +235,16 @@
                                 } else if (msg.type === 'markdown') {
                                     html += '<div style="padding: 8px; color: #fff; font-size: 20px;">' +
                                             simpleMarkdown(msg.content || '') + '</div>';
+                                } else if (msg.type === 'image') {
+                                    // Support both url and base64 data
+                                    var src = msg.url || msg.data || msg.src || msg.content || '';
+                                    var alt = msg.alt || 'Image';
+                                    html += '<div style="padding: 8px; text-align: center;">' +
+                                            '<img src="' + escapeHtml(src) + '" alt="' + escapeHtml(alt) + '" ' +
+                                            'style="max-width: 100%; max-height: 300px; border-radius: 8px; object-fit: contain;" ' +
+                                            'onerror="this.style.display=\'none\'; this.nextSibling.style.display=\'block\';" />' +
+                                            '<div style="display: none; color: #ff6b35; font-size: 16px;">Failed to load image</div>' +
+                                            '</div>';
                                 }
                             });
                         } else if (typeof messages === 'string') {
@@ -266,11 +276,51 @@
             }
 
             function simpleMarkdown(text) {
-                return escapeHtml(text)
+                // First handle markdown images before escaping
+                var imagePattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+                var images = [];
+                var imageIndex = 0;
+                text = text.replace(imagePattern, function(match, alt, url) {
+                    var placeholder = '___IMG_' + imageIndex + '___';
+                    images.push({alt: alt, url: url});
+                    imageIndex++;
+                    return placeholder;
+                });
+
+                // Detect standalone image URLs (http/https ending in image extension)
+                var urlImagePattern = /(https?:\/\/[^\s<>"]+\.(?:png|jpg|jpeg|gif|webp|svg)(?:\?[^\s<>"]*)?)/gi;
+                text = text.replace(urlImagePattern, function(url) {
+                    var placeholder = '___IMG_' + imageIndex + '___';
+                    images.push({alt: 'Image', url: url});
+                    imageIndex++;
+                    return placeholder;
+                });
+
+                // Detect base64 image data
+                var base64Pattern = /(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+\/=]+)/g;
+                text = text.replace(base64Pattern, function(dataUrl) {
+                    var placeholder = '___IMG_' + imageIndex + '___';
+                    images.push({alt: 'Image', url: dataUrl});
+                    imageIndex++;
+                    return placeholder;
+                });
+
+                // Now escape and apply markdown
+                var result = escapeHtml(text)
                     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                     .replace(/\*(.*?)\*/g, '<em>$1</em>')
                     .replace(/`(.*?)`/g, '<code style="background:#333;padding:2px 4px;border-radius:2px;">$1</code>')
                     .replace(/\n/g, '<br>');
+
+                // Restore images
+                images.forEach(function(img, i) {
+                    var imgHtml = '<img src="' + escapeHtml(img.url) + '" alt="' + escapeHtml(img.alt) + '" ' +
+                                  'style="max-width: 100%; max-height: 300px; border-radius: 8px; display: block; margin: 8px auto;" ' +
+                                  'onerror="this.style.display=\'none\';" />';
+                    result = result.replace('___IMG_' + i + '___', imgHtml);
+                });
+
+                return result;
             }
 
             // Ready notification
